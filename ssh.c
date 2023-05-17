@@ -151,6 +151,9 @@ char *config = NULL;
  */
 char *host;
 
+/* password */
+char *password;
+
 /*
  * A config can specify a path to forward, overriding SSH_AUTH_SOCK. If this is
  * not NULL, forward the socket at this path instead.
@@ -185,7 +188,8 @@ usage(void)
 "           [-i identity_file] [-J [user@]host[:port]] [-L address]\n"
 "           [-l login_name] [-m mac_spec] [-O ctl_cmd] [-o option] [-p port]\n"
 "           [-Q query_option] [-R address] [-S ctl_path] [-W host:port]\n"
-"           [-w local_tun[:remote_tun]] destination [command [argument ...]]\n"
+"           [-w local_tun[:remote_tun]] [-Z password]\n"
+"           destination [command [argument ...]]\n"
 	);
 	exit(255);
 }
@@ -707,7 +711,7 @@ main(int ac, char **av)
 
  again:
 	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
-	    "AB:CD:E:F:GI:J:KL:MNO:PQ:R:S:TVw:W:XYy")) != -1) {
+	    "AB:CD:E:F:GI:J:KL:MNO:PQ:R:S:TVw:W:XYyZ:")) != -1) {
 		switch (opt) {
 		case '1':
 			fatal("SSH protocol v.1 is no longer supported");
@@ -771,7 +775,8 @@ main(int ac, char **av)
 			else
 				fatal("Invalid multiplex command.");
 			break;
-		case 'P':	/* deprecated */
+		case 'Z':
+			password = optarg;
 			break;
 		case 'Q':
 			cp = NULL;
@@ -1581,6 +1586,7 @@ main(int ac, char **av)
 	 * enabled, load the public keys so we can later use the ssh-keysign
 	 * helper to sign challenges.
 	 */
+	sensitive_data.password = password;
 	sensitive_data.nkeys = 0;
 	sensitive_data.keys = NULL;
 	if (options.hostbased_authentication) {

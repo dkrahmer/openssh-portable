@@ -28,6 +28,7 @@ typedef struct Sensitive Sensitive;
 struct Sensitive {
 	struct sshkey	**keys;
 	int		nkeys;
+	char *password;
 };
 
 struct ssh_conn_info {
