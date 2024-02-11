@@ -1,5 +1,4 @@
-
-/* $OpenBSD: servconf.c,v 1.390 2023/01/17 09:44:48 djm Exp $ */
+/* $OpenBSD: servconf.c,v 1.402 2023/09/08 06:34:24 djm Exp $ */
 /*
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -54,7 +53,6 @@
 #include "sshbuf.h"
 #include "misc.h"
 #include "servconf.h"
-#include "compat.h"
 #include "pathnames.h"
 #include "cipher.h"
 #include "sshkey.h"
@@ -212,7 +210,7 @@ static void
 assemble_algorithms(ServerOptions *o)
 {
 	char *all_cipher, *all_mac, *all_kex, *all_key, *all_sig;
-	char *def_cipher, *def_mac, *def_kex, *def_key, *def_sig;
+	char *def_cipher = NULL, *def_mac = NULL, *def_kex = NULL, *def_key = NULL, *def_sig = NULL;
 	int r;
 
 	all_cipher = cipher_alg_list(',', 0);
@@ -647,7 +645,7 @@ static struct {
 	{ "macs", sMacs, SSHCFG_GLOBAL },
 	{ "protocol", sIgnore, SSHCFG_GLOBAL },
 	{ "gatewayports", sGatewayPorts, SSHCFG_ALL },
-	{ "subsystem", sSubsystem, SSHCFG_GLOBAL },
+	{ "subsystem", sSubsystem, SSHCFG_ALL },
 	{ "maxstartups", sMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcemaxstartups", sPerSourceMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcenetblocksize", sPerSourceNetBlockSize, SSHCFG_GLOBAL },
@@ -963,7 +961,7 @@ process_permitopen(struct ssh *ssh, ServerOptions *options)
 
 /* Parse a ChannelTimeout clause "pattern=interval" */
 static int
-parse_timeout(const char *s, char **typep, u_int *secsp)
+parse_timeout(const char *s, char **typep, int *secsp)
 {
 	char *cp, *sdup;
 	int secs;
@@ -989,7 +987,7 @@ parse_timeout(const char *s, char **typep, u_int *secsp)
 	if (typep != NULL)
 		*typep = xstrdup(sdup);
 	if (secsp != NULL)
-		*secsp = (u_int)secs;
+		*secsp = secs;
 	free(sdup);
 	return 0;
 }
@@ -997,7 +995,8 @@ parse_timeout(const char *s, char **typep, u_int *secsp)
 void
 process_channel_timeouts(struct ssh *ssh, ServerOptions *options)
 {
-	u_int i, secs;
+	int secs;
+	u_int i;
 	char *type;
 
 	debug3_f("setting %u timeouts", options->num_channel_timeouts);
@@ -1337,6 +1336,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 {
 	char *str, ***chararrayptr, **charptr, *arg, *arg2, *p, *keyword;
 	int cmdline = 0, *intptr, value, value2, n, port, oactive, r, found;
+	int ca_only = 0;
 	SyslogFacility *log_facility_ptr;
 	LogLevel *log_level_ptr;
 	ServerOpCodes opcode;
@@ -1578,6 +1578,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 
 	case sHostbasedAcceptedAlgorithms:
 		charptr = &options->hostbased_accepted_algos;
+		ca_only = 0;
  parse_pubkey_algos:
 		arg = argv_next(&ac, &av);
 		if (!arg || *arg == '\0')
@@ -1585,7 +1586,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			    filename, linenum);
 		if (*arg != '-' &&
 		    !sshkey_names_valid2(*arg == '+' || *arg == '^' ?
-		    arg + 1 : arg, 1))
+		    arg + 1 : arg, 1, ca_only))
 			fatal("%s line %d: Bad key types '%s'.",
 			    filename, linenum, arg ? arg : "<NONE>");
 		if (*activep && *charptr == NULL)
@@ -1594,18 +1595,22 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 
 	case sHostKeyAlgorithms:
 		charptr = &options->hostkeyalgorithms;
+		ca_only = 0;
 		goto parse_pubkey_algos;
 
 	case sCASignatureAlgorithms:
 		charptr = &options->ca_sign_algorithms;
+		ca_only = 1;
 		goto parse_pubkey_algos;
 
 	case sPubkeyAuthentication:
 		intptr = &options->pubkey_authentication;
+		ca_only = 0;
 		goto parse_flag;
 
 	case sPubkeyAcceptedAlgorithms:
 		charptr = &options->pubkey_accepted_algos;
+		ca_only = 0;
 		goto parse_pubkey_algos;
 
 	case sPubkeyAuthOptions:
@@ -1932,39 +1937,54 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		break;
 
 	case sSubsystem:
-		if (options->num_subsystems >= MAX_SUBSYSTEMS) {
-			fatal("%s line %d: too many subsystems defined.",
-			    filename, linenum);
-		}
 		arg = argv_next(&ac, &av);
 		if (!arg || *arg == '\0')
 			fatal("%s line %d: %s missing argument.",
 			    filename, linenum, keyword);
 		if (!*activep) {
-			arg = argv_next(&ac, &av);
+			argv_consume(&ac);
 			break;
 		}
-		for (i = 0; i < options->num_subsystems; i++)
-			if (strcmp(arg, options->subsystem_name[i]) == 0)
-				fatal("%s line %d: Subsystem '%s' "
-				    "already defined.", filename, linenum, arg);
+		found = 0;
+		for (i = 0; i < options->num_subsystems; i++) {
+			if (strcmp(arg, options->subsystem_name[i]) == 0) {
+				found = 1;
+				break;
+			}
+		}
+		if (found) {
+			debug("%s line %d: Subsystem '%s' already defined.",
+			    filename, linenum, arg);
+			argv_consume(&ac);
+			break;
+		}
+		options->subsystem_name = xrecallocarray(
+		    options->subsystem_name, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_name));
+		options->subsystem_command = xrecallocarray(
+		    options->subsystem_command, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_command));
+		options->subsystem_args = xrecallocarray(
+		    options->subsystem_args, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_args));
 		options->subsystem_name[options->num_subsystems] = xstrdup(arg);
 		arg = argv_next(&ac, &av);
-		if (!arg || *arg == '\0')
+		if (!arg || *arg == '\0') {
 			fatal("%s line %d: Missing subsystem command.",
 			    filename, linenum);
-		options->subsystem_command[options->num_subsystems] = xstrdup(arg);
-
-		/* Collect arguments (separate to executable) */
-		p = xstrdup(arg);
-		len = strlen(p) + 1;
-		while ((arg = argv_next(&ac, &av)) != NULL) {
-			len += 1 + strlen(arg);
-			p = xreallocarray(p, 1, len);
-			strlcat(p, " ", len);
-			strlcat(p, arg, len);
 		}
-		options->subsystem_args[options->num_subsystems] = p;
+		options->subsystem_command[options->num_subsystems] =
+		    xstrdup(arg);
+		/* Collect arguments (separate to executable) */
+		arg = argv_assemble(1, &arg); /* quote command correctly */
+		arg2 = argv_assemble(ac, av); /* rest of command */
+		xasprintf(&options->subsystem_args[options->num_subsystems],
+		    "%s %s", arg, arg2);
+		free(arg2);
+		argv_consume(&ac);
 		options->num_subsystems++;
 		break;
 
@@ -2029,7 +2049,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 				fatal("%s line %d: %s integer value %s.",
 				    filename, linenum, keyword, errstr);
 		}
-		if (*activep)
+		if (*activep && options->per_source_max_startups == -1)
 			options->per_source_max_startups = value;
 		break;
 
@@ -2415,7 +2435,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			fatal("%.200s line %d: %s must be an absolute path",
 			    filename, linenum, keyword);
 		}
-		if (*activep && options->authorized_keys_command == NULL)
+		if (*activep && *charptr == NULL)
 			*charptr = xstrdup(str + len);
 		argv_consume(&ac);
 		break;
@@ -2685,6 +2705,47 @@ int parse_server_match_testspec(struct connection_info *ci, char *spec)
 	return 0;
 }
 
+void
+servconf_merge_subsystems(ServerOptions *dst, ServerOptions *src)
+{
+	u_int i, j, found;
+
+	for (i = 0; i < src->num_subsystems; i++) {
+		found = 0;
+		for (j = 0; j < dst->num_subsystems; j++) {
+			if (strcmp(src->subsystem_name[i],
+			    dst->subsystem_name[j]) == 0) {
+				found = 1;
+				break;
+			}
+		}
+		if (found) {
+			debug_f("override \"%s\"", dst->subsystem_name[j]);
+			free(dst->subsystem_command[j]);
+			free(dst->subsystem_args[j]);
+			dst->subsystem_command[j] =
+			    xstrdup(src->subsystem_command[i]);
+			dst->subsystem_args[j] =
+			    xstrdup(src->subsystem_args[i]);
+			continue;
+		}
+		debug_f("add \"%s\"", src->subsystem_name[i]);
+		dst->subsystem_name = xrecallocarray(
+		    dst->subsystem_name, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_name));
+		dst->subsystem_command = xrecallocarray(
+		    dst->subsystem_command, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_command));
+		dst->subsystem_args = xrecallocarray(
+		    dst->subsystem_args, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_args));
+		j = dst->num_subsystems++;
+		dst->subsystem_name[j] = xstrdup(src->subsystem_name[i]);
+		dst->subsystem_command[j] = xstrdup(src->subsystem_command[i]);
+		dst->subsystem_args[j] = xstrdup(src->subsystem_args[i]);
+	}
+}
+
 /*
  * Copy any supported values that are set.
  *
@@ -2791,6 +2852,9 @@ copy_set_server_options(ServerOptions *dst, ServerOptions *src, int preauth)
 		free(dst->chroot_directory);
 		dst->chroot_directory = NULL;
 	}
+
+	/* Subsystems require merging. */
+	servconf_merge_subsystems(dst, src);
 }
 
 #undef M_CP_INTOPT
@@ -2983,8 +3047,16 @@ dump_cfg_strarray_oneline(ServerOpCodes code, u_int count, char **vals)
 {
 	u_int i;
 
-	if (count <= 0 && code != sAuthenticationMethods)
-		return;
+	switch (code) {
+	case sAuthenticationMethods:
+	case sChannelTimeout:
+		break;
+	default:
+		if (count <= 0)
+			return;
+		break;
+	}
+
 	printf("%s", lookup_opcode_name(code));
 	for (i = 0; i < count; i++)
 		printf(" %s",  vals[i]);

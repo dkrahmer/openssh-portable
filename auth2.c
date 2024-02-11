@@ -1,4 +1,4 @@
-/* $OpenBSD: auth2.c,v 1.164 2022/02/23 11:18:13 djm Exp $ */
+/* $OpenBSD: auth2.c,v 1.167 2023/08/28 09:48:11 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -46,7 +46,6 @@
 #include "sshbuf.h"
 #include "misc.h"
 #include "servconf.h"
-#include "compat.h"
 #include "sshkey.h"
 #include "hostfile.h"
 #include "auth.h"
@@ -181,7 +180,6 @@ do_authentication2(struct ssh *ssh)
 	ssh->authctxt = NULL;
 }
 
-/*ARGSUSED*/
 static int
 input_service_request(int type, u_int32_t seq, struct ssh *ssh)
 {
@@ -223,6 +221,7 @@ input_service_request(int type, u_int32_t seq, struct ssh *ssh)
 }
 
 #define MIN_FAIL_DELAY_SECONDS 0.005
+#define MAX_FAIL_DELAY_SECONDS 5.0
 static double
 user_specific_delay(const char *user)
 {
@@ -248,6 +247,12 @@ ensure_minimum_time_since(double start, double seconds)
 	struct timespec ts;
 	double elapsed = monotime_double() - start, req = seconds, remain;
 
+	if (elapsed > MAX_FAIL_DELAY_SECONDS) {
+		debug3_f("elapsed %0.3lfms exceeded the max delay "
+		    "requested %0.3lfms)", elapsed*1000, req*1000);
+		return;
+	}
+
 	/* if we've already passed the requested time, scale up */
 	while ((remain = seconds - elapsed) < 0.0)
 		seconds *= 2;
@@ -259,7 +264,6 @@ ensure_minimum_time_since(double start, double seconds)
 	nanosleep(&ts, NULL);
 }
 
-/*ARGSUSED*/
 static int
 input_userauth_request(int type, u_int32_t seq, struct ssh *ssh)
 {
@@ -340,7 +344,7 @@ input_userauth_request(int type, u_int32_t seq, struct ssh *ssh)
 		debug2("input_userauth_request: try method %s", method);
 		authenticated =	m->userauth(ssh, method);
 	}
-	if (!authctxt->authenticated)
+	if (!authctxt->authenticated && strcmp(method, "none") != 0)
 		ensure_minimum_time_since(tstart,
 		    user_specific_delay(authctxt->user));
 	userauth_finish(ssh, authenticated, method, NULL);

@@ -144,43 +144,14 @@ function Start-OpenSSHBootstrap
     param(
         [ValidateSet('x86', 'x64', 'arm64', 'arm')]
         [string]$NativeHostArch = "x64",
-
         [switch]$OneCore)
 
     [bool] $silent = -not $script:Verbose
     Write-BuildMsg -AsInfo -Message "Checking tools and dependencies" -Silent:$silent
 
-    $Win10SDKVerChoco = "10.1.17763.1"
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'MACHINE')
-    $newMachineEnvironmentPath = $machinePath   
-
-    # Install chocolatey
-    $chocolateyPath = "$env:AllUsersProfile\chocolatey\bin"
-    if(Get-Command choco -ErrorAction SilentlyContinue)
-    {
-        Write-BuildMsg -AsVerbose -Message "Chocolatey is already installed. Skipping installation." -Silent:$silent
-    }
-    else
-    {
-        Write-BuildMsg -AsInfo -Message "Chocolatey not present. Installing chocolatey." -Silent:$silent
-        Invoke-Expression ((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1')) 2>&1 >> $script:BuildLogFile
-    }
-
-    if (-not ($machinePath.ToLower().Contains($chocolateyPath.ToLower())))
-    {
-        Write-BuildMsg -AsVerbose -Message "Adding $chocolateyPath to Path environment variable" -Silent:$silent
-        $newMachineEnvironmentPath = "$chocolateyPath;$newMachineEnvironmentPath"
-        if(-not ($env:Path.ToLower().Contains($chocolateyPath.ToLower())))
-        {
-            $env:Path = "$chocolateyPath;$env:Path"
-        }
-    }
-    else
-    {
-        Write-BuildMsg -AsVerbose -Message "$chocolateyPath already present in Path environment variable" -Silent:$silent
-    }
-
     # Add git\cmd to the path
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'MACHINE')
+    $newMachineEnvironmentPath = $machinePath 
     $gitCmdPath = "$env:ProgramFiles\git\cmd"
     if (-not ($machinePath.ToLower().Contains($gitCmdPath.ToLower())))
     {
@@ -196,10 +167,6 @@ function Start-OpenSSHBootstrap
         Write-BuildMsg -AsVerbose -Message "$gitCmdPath already present in Path environment variable" -Silent:$silent
     }
 
-    $VS2019Path = Get-VS2019BuildToolPath
-    $VS2017Path = Get-VS2017BuildToolPath
-    $VS2015Path = Get-VS2015BuildToolPath
-
     # Update machine environment path
     if ($newMachineEnvironmentPath -ne $machinePath)
     {
@@ -207,12 +174,12 @@ function Start-OpenSSHBootstrap
     }    
 
     $sdkVersion = Get-Windows10SDKVersion
-
     if ($null -eq $sdkVersion) 
     {
+        Get-Chocolatey
         $packageName = "windows-sdk-10.1"
         Write-BuildMsg -AsInfo -Message "$packageName not present. Installing $packageName ..."
-        choco install $packageName --version=$Win10SDKVerChoco -y --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
+        choco install $packageName -y --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
         # check that sdk was properly installed
         $sdkVersion = Get-Windows10SDKVersion
         if($null -eq $sdkVersion)
@@ -221,121 +188,98 @@ function Start-OpenSSHBootstrap
         }
     }
 
-    # Using the Win 10 SDK, the x86/x64 builds with VS2015 need vctargetspath to be set.
-    # For clarity, we set vctargetspath for the arm32/arm64 builds, as well, but it is not required.
-    if (($NativeHostArch -eq 'x86') -or ($NativeHostArch -eq 'x64')) 
-    {
-        $env:vctargetspath = "${env:ProgramFiles(x86)}\MSBuild\Microsoft.Cpp\v4.0\v140"
-        if (-not (Test-Path $env:vctargetspath)) 
-        {
-            Write-BuildMsg -AsInfo -Message "installing visualcpp-build-tools"
-            choco install visualcpp-build-tools --version 14.0.25420.1 -y --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
-            # check that build-tools were properly installed
-            if(-not (Test-Path $env:vctargetspath))
-            {
-                Write-BuildMsg -AsError -ErrorAction Stop -Message "visualcpp-build-tools installation failed with error code $LASTEXITCODE."
-            }
-        }
+    $VisualStudioPath = Get-VisualStudioPath -NativeHostArch $NativeHostArch
+    Write-Host $VisualStudioPath
+    if ($null -ne $VisualStudioPath) {
+        $MSBuildPath = Get-MSBuildPath -VSInstallPath $VisualStudioPath
     }
-    else
-    {
-        # msbuildtools have a different path for visual studio versions older than 2017
-        # for visual studio versions newer than 2017, logic needs to be expanded to update the year in the path accordingly
-        if ($VS2019Path -or $VS2017Path)
-        {
-            $VSPathYear = "2017"
-            if ($VS2019Path)
-            {
-                $VSPathYear = "2019"
-            }
-            $env:vctargetspath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\${VSPathYear}\BuildTools\Common7\IDE\VC\VCTargets"
-        }
+    else {
+        $MSBuildPath = Get-VS2015BuildToolPath
     }
-
-    # check for corresponding build tools in the following VS order: 2019, 2017, 2015
-    # environment variable is set upon install up until VS2015 but not for newer versions
-    if ($VS2019Path)
+    if ($MSBuildPath | Select-String "2022") 
     {
+        $env:vctargetspath = Join-Path $VisualStudioPath "MSBuild\Microsoft\VC\v170\"
+        if ($null -eq $env:VS170COMNTOOLS)
+        {
+            $env:VS170COMNTOOLS = Get-BuildToolPath -VSInstallPath $VisualStudioPath -version "2022"
+        }
+        elseif (-not (Test-Path $env:VS170COMNTOOLS))
+        {
+            Write-BuildMsg -AsError -ErrorAction Stop -Message "$env:VS170COMNTOOLS build tools path is invalid"   
+        }
+        $VSBuildToolsPath = Get-Item(Join-Path $VisualStudioPath 'vc/auxiliary/build')
+    }
+    elseif ($MSBuildPath | Select-String "2019") 
+    {
+        $env:vctargetspath = Join-Path $VisualStudioPath "Common7\IDE\VC\VCTargets"
+        Write-BuildMsg -AsVerbose -Message "Setting vctargetspath env var to ${env:vctargetspath}"
         if ($null -eq $env:VS160COMNTOOLS)
         {
-            $env:VS160COMNTOOLS = Get-BuildToolPath -VSInstallPath $VS2019Path -version "2019"
+            $env:VS160COMNTOOLS = Get-BuildToolPath -VSInstallPath $VisualStudioPath -version "2019"
         }
         elseif (-not (Test-Path $env:VS160COMNTOOLS))
         {
             Write-BuildMsg -AsError -ErrorAction Stop -Message "$env:VS160COMNTOOLS build tools path is invalid"   
         }
-        $VSBuildToolsPath = Get-Item(Join-Path -Path $env:VS160COMNTOOLS -ChildPath '../../vc/auxiliary/build')
+        $VSBuildToolsPath = Get-Item(Join-Path $VisualStudioPath 'vc/auxiliary/build')
     }
-    elseif ($VS2017Path)
+    elseif ($MSBuildPath | Select-String "2017") 
     {
+        $env:vctargetspath = Join-Path $VisualStudioPath "Common7\IDE\VC\VCTargets"
         if ($null -eq $env:VS150COMNTOOLS)
         {
-            $env:VS150COMNTOOLS = Get-BuildToolPath -VSInstallPath $VS2017Path -version "2017"
+            $env:VS150COMNTOOLS = Get-BuildToolPath -VSInstallPath $VisualStudioPath -version "2017"
         }
         elseif (-not (Test-Path $env:VS150COMNTOOLS))
         {
             Write-BuildMsg -AsError -ErrorAction Stop -Message "$env:VS150COMNTOOLS build tools path is invalid"   
         }
-        $VSBuildToolsPath = Get-Item(Join-Path -Path $env:VS150COMNTOOLS -ChildPath '../../vc/auxiliary/build')
+        $VSBuildToolsPath = Get-Item(Join-Path $VisualStudioPath 'vc/auxiliary/build')
     }
-    elseif (!$VS2015Path -or ($null -eq $env:VS140COMNTOOLS)) {
-        $packageName = "vcbuildtools"
-        Write-BuildMsg -AsInfo -Message "$packageName not present. Installing $packageName ..."
-        choco install $packageName -ia "/InstallSelectableItems VisualCppBuildTools_ATLMFC_SDK;VisualCppBuildTools_NETFX_SDK" -y --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
-        $errorCode = $LASTEXITCODE
-        if ($errorCode -eq 3010)
-        {
-            Write-Host "The recent package changes indicate a reboot is necessary. please reboot the machine, open a new powershell window and call Start-SSHBuild or Start-OpenSSHBootstrap again." -ForegroundColor Black -BackgroundColor Yellow
-            Do {
-                $input = Read-Host -Prompt "Reboot the machine? [Yes] Y; [No] N (default is `"Y`")"
-                if([string]::IsNullOrEmpty($input))
-                {
-                    $input = 'Y'
-                }
-            } until ($input -match "^(y(es)?|N(o)?)$")
-            [string]$ret = $Matches[0]
-            if ($ret.ToLower().Startswith('y'))
-            {
-                Write-BuildMsg -AsWarning -Message "restarting machine ..."
-                Restart-Computer -Force
-                exit
-            }
-            else
-            {
-                Write-BuildMsg -AsError -ErrorAction Stop -Message "User choose not to restart the machine to apply the changes."
-            }
-        }
-        elseif($errorCode -ne 0)
-        {
-            Write-BuildMsg -AsError -ErrorAction Stop -Message "$packageName installation failed with error code $errorCode."
-        }
-        $VSBuildToolsPath = Get-Item(Join-Path -Path $env:VS140COMNTOOLS -ChildPath '../../vc')
-    }
-    else
+    else 
     {
+        if($NativeHostArch.ToLower().Startswith('arm'))
+        {
+            #TODO: Install VS2019 or VS2017 build tools
+            Write-BuildMsg -AsError -ErrorAction Stop -Message "The required msbuild 15.0, or greater, is not installed on the machine."
+        }
+
         $VSBuildToolsPath = Get-Item(Join-Path -Path $env:VS140COMNTOOLS -ChildPath '../../vc')
         Write-BuildMsg -AsVerbose -Message 'VC++ 2015 Build Tools already present.'
-    }
-
-    if($NativeHostArch.ToLower().Startswith('arm') -and !$VS2019Path -and !$VS2017Path)
-    {
-        #TODO: Install VS2019 or VS2017 build tools
-        Write-BuildMsg -AsError -ErrorAction Stop -Message "The required msbuild 15.0 is not installed on the machine."
-    }
-
-    if($OneCore -or ($NativeHostArch.ToLower().Startswith('arm')))
-    {
-        $win10sdk = Get-Windows10SDKVersion
-        if($null -eq $win10sdk)
-        {
-            $packageName = "windows-sdk-10.1"
+        
+        if (!$MSBuildPath -or ($null -eq $env:VS140COMNTOOLS)) {
+            Get-Chocolatey
+            $packageName = "vcbuildtools"
             Write-BuildMsg -AsInfo -Message "$packageName not present. Installing $packageName ..."
-            choco install $packageName --version=$Win10SDKVerChoco --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
-            $win10sdk = Get-Windows10SDKVersion
-            if($null -eq $win10sdk)
+            choco install $packageName -ia "/InstallSelectableItems VisualCppBuildTools_ATLMFC_SDK;VisualCppBuildTools_NETFX_SDK" -y --force --limitoutput --execution-timeout 120 2>&1 >> $script:BuildLogFile
+            $errorCode = $LASTEXITCODE
+            if ($errorCode -eq 3010)
             {
-                Write-BuildMsg -AsError -ErrorAction Stop -Message "$packageName installation failed with error code $LASTEXITCODE."
+                Write-Host "The recent package changes indicate a reboot is necessary. please reboot the machine, open a new powershell window and call Start-SSHBuild or Start-OpenSSHBootstrap again." -ForegroundColor Black -BackgroundColor Yellow
+                Do {
+                    $input = Read-Host -Prompt "Reboot the machine? [Yes] Y; [No] N (default is `"Y`")"
+                    if([string]::IsNullOrEmpty($input))
+                    {
+                        $input = 'Y'
+                    }
+                } until ($input -match "^(y(es)?|N(o)?)$")
+                [string]$ret = $Matches[0]
+                if ($ret -like 'y*')
+                {
+                    Write-BuildMsg -AsWarning -Message "restarting machine ..."
+                    Restart-Computer -Force
+                    exit
+                }
+                else
+                {
+                    Write-BuildMsg -AsError -ErrorAction Stop -Message "User choose not to restart the machine to apply the changes."
+                }
             }
+            elseif($errorCode -ne 0)
+            {
+                Write-BuildMsg -AsError -ErrorAction Stop -Message "$packageName installation failed with error code $errorCode."
+            }
+            $VSBuildToolsPath = Get-Item(Join-Path -Path $env:VS140COMNTOOLS -ChildPath '../../vc')
         }
     }
 
@@ -580,11 +524,12 @@ function Start-OpenSSHBuild
         (Get-Content $f).Replace('#define OPENSSL_HAS_NISTP521 1','') | Set-Content $f
     }
     
+    $win10SDKVer = Get-Windows10SDKVersion
+    [XML]$xml = Get-Content $PathTargets
+    $xml.Project.PropertyGroup.WindowsSDKVersion = $win10SDKVer.ToString()
+    
     if($NativeHostArch.ToLower().Startswith('arm'))
     {
-        $win10SDKVer = Get-Windows10SDKVersion
-        [XML]$xml = Get-Content $PathTargets
-        $xml.Project.PropertyGroup.WindowsSDKVersion = $win10SDKVer.ToString()
         $arch = $NativeHostArch.ToUpper()
         $nodeName = "WindowsSDKDesktop$($arch)Support"
         $node = $xml.Project.PropertyGroup.ChildNodes | where {$_.Name -eq $nodeName}
@@ -598,14 +543,14 @@ function Start-OpenSSHBuild
         {
             $node.InnerText = "true"
         }
-        $xml.Save($PathTargets)
     }
+    $xml.Save($PathTargets)
 
     if($OneCore)
     {
         $win10SDKVer = Get-Windows10SDKVersion
         [XML]$xml = Get-Content $PathTargets
-        $xml.Project.PropertyGroup.WindowsSDKVersion = $win10SDKVer.ToString()
+        $xml.Project.PropertyGroup.WindowsSDKVersion = $win10SDKVer
         $xml.Project.PropertyGroup.AdditionalDependentLibs = 'onecore.lib;shlwapi.lib'
         $xml.Project.PropertyGroup.MinimalCoreWin = 'true'
         
@@ -625,22 +570,14 @@ function Start-OpenSSHBuild
         $cmdMsg += "/noconlog"
     }
 
-    if ($msbuildCmd = Get-VS2019BuildToolPath)
-    {
-        Write-BuildMsg -AsInfo -Message "Using MSBuild path: $msbuildCmd"
+    $VisualStudioPath = Get-VisualStudioPath -NativeHostArch $NativeHostArch
+    if ($null -ne $VisualStudioPath) {
+        $msbuildCmd = Get-MSBuildPath -VSInstallPath $VisualStudioPath
     }
-    elseif ($msbuildCmd = Get-VS2017BuildToolPath)
-    {
-        Write-BuildMsg -AsInfo -Message "Using MSBuild path: $msbuildCmd"
+    else {
+        $msbuildCmd = Get-VS2015BuildToolPath
     }
-    elseif ($msbuildCmd = Get-VS2015BuildToolPath)
-    {
-        Write-BuildMsg -AsInfo -Message "Using MSBuild path: $msbuildCmd"
-    }
-    else
-    {
-        Write-BuildMsg -AsError -ErrorAction Stop -Message "MSBuild not found"
-    }
+    Write-BuildMsg -AsInfo -Message "Using MSBuild path: $msbuildCmd"
 
     Write-BuildMsg -AsInfo -Message "Starting Open SSH build; Build Log: $($script:BuildLogFile)."
     Write-BuildMsg -AsInfo -Message "$msbuildCmd $cmdMsg"
@@ -656,40 +593,6 @@ function Start-OpenSSHBuild
     Write-BuildMsg -AsInfo -Message "SSH build successful."
 }
 
-function Get-VS2019BuildToolPath
-{
-    # TODO: Should use vswhere: https://github.com/microsoft/vswhere/wiki/Find-MSBuild
-    $searchPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\*\MSBuild\Current\Bin"
-    if($env:PROCESSOR_ARCHITECTURE -ieq "AMD64")
-    {
-        $searchPath += "\amd64"
-    }
-    $toolAvailable = @()
-    $toolAvailable += Get-ChildItem -path $searchPath\* -Filter "MSBuild.exe" -ErrorAction SilentlyContinue
-    if($toolAvailable.count -eq 0)
-    {
-        return $null
-    }
-    return $toolAvailable[0].FullName
-}
-
-function Get-VS2017BuildToolPath
-{
-    # TODO: Should use vswhere: https://github.com/microsoft/vswhere/wiki/Find-MSBuild
-    $searchPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2017\*\MSBuild\15.0\Bin"
-    if($env:PROCESSOR_ARCHITECTURE -ieq "AMD64")
-    {
-        $searchPath += "\amd64"
-    }
-    $toolAvailable = @()
-    $toolAvailable += Get-ChildItem -path $searchPath\* -Filter "MSBuild.exe" -ErrorAction SilentlyContinue
-    if($toolAvailable.count -eq 0)
-    {
-        return $null
-    }
-    return $toolAvailable[0].FullName
-}
-
 function Get-VS2015BuildToolPath
 {
     $searchPath = "${env:ProgramFiles(x86)}\MSBuild\14.0\Bin"
@@ -698,8 +601,63 @@ function Get-VS2015BuildToolPath
         $searchPath += "\amd64"
     }
     $toolAvailable = @()
-    $toolAvailable += Get-ChildItem -path $searchPath\* -Filter "MSBuild.exe" -ErrorAction SilentlyContinue
-    if($toolAvailable.count -eq 0)
+    $toolAvailable = Get-ChildItem -path $searchPath\* -Filter "MSBuild.exe" -ErrorAction SilentlyContinue
+    if($null -eq $toolAvailable)
+    {
+        return $null
+    }
+    return $toolAvailable[0].FullName
+}
+
+function Get-VisualStudioPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('x86', 'x64', 'arm64', 'arm')]
+        [string]$NativeHostArch
+    )
+    $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vsWherePath) {
+        $requiredVCtools = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+        if ($NativeHostArch -eq 'arm') {
+            $requiredVCtools = 'Microsoft.VisualStudio.Component.VC.Tools.ARM'
+        }
+        elseif ($NativeHostArch -eq 'arm64') {
+            $requiredVCtools = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+        }
+        write-host "$vsWherePath -products * -requires $requiredVCtools -property installationPath"
+        $VSPaths = (& $vsWherePath -products * -requires $requiredVCtools -property installationPath)
+        # for some reason, VSWhere does not seem to find MSBuild so check manually
+        if ($null -ne $VSPaths) {
+            foreach ($VSPath in $VSPaths) {
+                if (Get-MSBuildPath -VSInstallPath $VSPath) {
+                    return $VSPath
+                }
+            }
+            # if none of the VS installs have MSBuild, then build cannot proceed
+            Write-BuildMsg -AsError -ErrorAction Stop -Message "Visual Studio with required components not found, please ensure Microsoft.VisualStudio.Workload.MSBuildTools are installed"
+        }
+        else {
+            Write-BuildMsg -AsError -ErrorAction Stop -Message "Visual Studio with required components not found, please ensure $requiredVCtools are installed"
+        }
+    }
+    else {
+        Write-BuildMsg -AsWarning -Message "VSWhere not found - please install VS 2017 Update 2, or newer, defaulting to Visual Studio 2015"
+        return $null
+    }
+}
+function Get-MSBuildPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VSInstallPath
+    )
+    $searchPath = "MSBuild\**\Bin\"
+    if($env:PROCESSOR_ARCHITECTURE -ieq "AMD64")
+    {
+        $searchPath += "\amd64"
+    }
+    $fullSearchPath = Join-Path $VSInstallPath $searchPath
+    $toolAvailable = Get-ChildItem -path $fullSearchPath\* -Filter "MSBuild.exe" -ErrorAction SilentlyContinue
+    if($null -eq $toolAvailable)
     {
         return $null
     }
@@ -708,15 +666,15 @@ function Get-VS2015BuildToolPath
 
 function Get-BuildToolPath
 {
-    param
-    (
-        [Parameter(Mandatory = $true)]
+    param (
         [string]$VSInstallPath,
-        [string]$version)
+        [string]$version
+    )
 
-    $buildToolsPath = Get-Item(Join-Path -Path $VSInstallPath -ChildPath '../../../../../Common7/Tools/') | % {$_.FullName}
+    $buildToolsPath = Get-Item(Join-Path $VSInstallPath 'Common7/Tools/') | % {$_.FullName}
     if (-not (Test-Path $buildToolsPath))
     {
+        Get-Chocolatey
         # assumes package name follows this format, as 2019 and 2017 both do
         $packageName = "visualstudio" + $version + "-workload-vctools"
         Write-BuildMsg -AsInfo -Message "$packageName not present. Installing $packageName ..."
@@ -732,16 +690,23 @@ function Get-BuildToolPath
 
 function Get-Windows10SDKVersion
 {  
-   #Temporary fix - Onecore builds are failing with latest windows 10 SDK (10.0.18362.0)
-   $requiredSDKVersion = [version]"10.0.17763.0" 
-   ## Search for latest windows sdk available on the machine
-   $windowsSDKPath = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$requiredSDKVersion\x86\register_app.vbs"
-   if (test-path $windowsSDKPath) {
-       return $requiredSDKVersion
-   }
-   else {
-       return $null
-   }
+    ## Search for latest windows sdk available on the machine
+    $windowsSDKPath = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib"
+    $minSDKVersion = [version]"10.0.17763.0"
+    $versionsAvailable = @()
+    $versionsAvailable = Get-ChildItem $windowsSDKPath | ? {$_.Name.StartsWith("10.")} | % {$version = [version]$_.Name; if(($version.CompareTo($minSDKVersion) -ge 0)) {$version.ToString()}}
+    if($null -eq $versionsAvailable)
+    {
+         return $null
+    }
+    $versionsAvailable = $versionsAvailable | Sort-Object -Descending
+    foreach ($version in $versionsAvailable) {
+        $windowsSDKPath = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$version\x86\register_app.vbs"
+        if (test-path $windowsSDKPath) {
+            return $version
+        }
+    }
+    return $null
 }
 
 function Get-BuildLogFile
@@ -782,6 +747,41 @@ function Get-SolutionFile
     }
 }
 
+function Get-Chocolatey {
+    # Install chocolatey
+    $chocolateyPath = "$env:AllUsersProfile\chocolatey\bin"
+    if(Get-Command choco -ErrorAction SilentlyContinue)
+    {
+        Write-BuildMsg -AsVerbose -Message "Chocolatey is already installed. Skipping installation." -Silent:$silent
+    }
+    else
+    {
+        Write-BuildMsg -AsInfo -Message "Chocolatey not present. Installing chocolatey." -Silent:$silent
+        Invoke-Expression ((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1')) 2>&1 >> $script:BuildLogFile
+    }
 
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'MACHINE')
+    $newMachineEnvironmentPath = $machinePath   
+
+    if (-not ($machinePath.ToLower().Contains($chocolateyPath.ToLower())))
+    {
+        Write-BuildMsg -AsVerbose -Message "Adding $chocolateyPath to Path environment variable" -Silent:$silent
+        $newMachineEnvironmentPath = "$chocolateyPath;$newMachineEnvironmentPath"
+        if(-not ($env:Path.ToLower().Contains($chocolateyPath.ToLower())))
+        {
+            $env:Path = "$chocolateyPath;$env:Path"
+        }
+    }
+    else
+    {
+        Write-BuildMsg -AsVerbose -Message "$chocolateyPath already present in Path environment variable" -Silent:$silent
+    }
+
+    # Update machine environment path
+    if ($newMachineEnvironmentPath -ne $machinePath)
+    {
+        [Environment]::SetEnvironmentVariable('Path', $newMachineEnvironmentPath, 'MACHINE')
+    }    
+}
 
 Export-ModuleMember -Function Start-OpenSSHBuild, Get-BuildLogFile, Start-OpenSSHPackage, Copy-OpenSSHUnitTests

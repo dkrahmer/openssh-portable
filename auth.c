@@ -1,4 +1,4 @@
-/* $OpenBSD: auth.c,v 1.159 2022/12/09 00:17:40 dtucker Exp $ */
+/* $OpenBSD: auth.c,v 1.160 2023/03/05 05:34:09 dtucker Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -74,7 +74,6 @@
 #include "authfile.h"
 #include "monitor_wrap.h"
 #include "ssherr.h"
-#include "compat.h"
 #include "channels.h"
 
 #ifdef WINDOWS
@@ -92,7 +91,14 @@ extern struct passwd *privsep_pw;
 extern struct sshauthopt *auth_opts;
 
 /* Debugging messages */
-static struct sshbuf *auth_debug;
+#ifndef WINDOWS
+	static struct sshbuf *auth_debug;
+#else
+	/* removing static declaration due to access
+	violation thrown when compiling with platform
+	toolsets newer than v140 (VS2017 or above) */
+	struct sshbuf *auth_debug;
+#endif
 
 /*
  * Check if the user is allowed to log in via ssh. If user is listed
